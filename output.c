@@ -182,6 +182,7 @@ handle_output_commit(struct wl_listener *listener, void *data)
 	 * - output layout change will also be called if needed to position the views
 	 * - always update output manager configuration even if the output is now disabled */
 
+	wlr_log(WLR_INFO, "in handle output commit");
 	if (event->state->committed & OUTPUT_CONFIG_UPDATED) {
 		update_output_manager_config(output->server);
 	}

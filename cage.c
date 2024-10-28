@@ -117,30 +117,56 @@ set_cloexec(int fd)
 	return true;
 }
 
-static bool
-spawn_primary_client(struct cg_server *server, char *argv[], pid_t *pid_out, struct wl_event_source **sigchld_source)
+void *
+kill_after_delay(void *arg)
 {
-	int fd[2];
+	int fd = *(int *) arg;
+
+	sleep(3);
+
+	if (kill(fd, SIGTERM) == -1) {
+		perror("kill");
+	} else {
+		printf("Sent SIGTERM to process associated with file descriptor %d\n", fd);
+	}
+
+	return NULL;
+}
+
+static bool
+spawn_primary_client(char *argv[], pid_t *pid_out, int fd[2])
+{
+	wlr_log(WLR_INFO, "BEFORE PIPE");
 	if (pipe(fd) != 0) {
 		wlr_log(WLR_ERROR, "Unable to create pipe");
 		return false;
 	}
+	wlr_log(WLR_INFO, "AFTER PIPE");
 
+	wlr_log(WLR_INFO, "BEFORE FORK");
 	pid_t pid = fork();
+	wlr_log(WLR_INFO, "AFTER FORK. FORK: %d", pid);
 	if (pid == 0) {
+		wlr_log(WLR_INFO, "IN PID==0");
 		sigset_t set;
 		sigemptyset(&set);
 		sigprocmask(SIG_SETMASK, &set, NULL);
 		/* Close read, we only need write in the primary client process. */
 		close(fd[0]);
+		wlr_log(WLR_INFO, "IN PID==0. BEFORE EXECVP. argv=%s", *argv);
+
 		execvp(argv[0], argv);
+		wlr_log(WLR_INFO, "IN PID==0. AFTER EXECVP");
 		/* execvp() returns only on failure */
 		wlr_log_errno(WLR_ERROR, "Failed to spawn client");
 		_exit(1);
 	} else if (pid == -1) {
-		wlr_log_errno(WLR_ERROR, "Unable to fork");
+		printf("IN PID ==-1");
+		wlr_log(WLR_INFO, "Unable to fork");
 		return false;
 	}
+
+	wlr_log(WLR_INFO, "AFTER FORK OR PID>0. FORK: %d", pid);
 
 	/* Set this early so that if we fail, the client process will be cleaned up properly. */
 	*pid_out = pid;
@@ -149,14 +175,8 @@ spawn_primary_client(struct cg_server *server, char *argv[], pid_t *pid_out, str
 		return false;
 	}
 
-	/* Close write, we only need read in Cage. */
-	close(fd[1]);
-
-	struct wl_event_loop *event_loop = wl_display_get_event_loop(server->wl_display);
-	uint32_t mask = WL_EVENT_HANGUP | WL_EVENT_ERROR;
-	*sigchld_source = wl_event_loop_add_fd(event_loop, fd[0], mask, sigchld_handler, server);
-
 	wlr_log(WLR_DEBUG, "Child process created with pid %d", pid);
+	wlr_log(WLR_INFO, "CHILD PROCESS CREATED: PID: %d. %d %d", pid, fd[0], fd[1]);
 	return true;
 }
 
@@ -281,7 +301,9 @@ main(int argc, char *argv[])
 {
 	struct cg_server server = {0};
 	struct wl_event_source *sigchld_source = NULL;
+	struct wl_event_source *sigchld_loader_source = NULL;
 	pid_t pid = 0;
+	pid_t pid_secondary = 0;
 	int ret = 0, app_ret = 0;
 
 	if (!parse_args(&server, argc, argv)) {
@@ -588,13 +610,50 @@ main(int argc, char *argv[])
 	}
 #endif
 
-	if (!spawn_primary_client(&server, argv + optind, &pid, &sigchld_source)) {
+	uint32_t mask = WL_EVENT_HANGUP | WL_EVENT_ERROR;
+
+	int app_fd[2];
+	if (!spawn_primary_client(argv + optind, &pid, app_fd)) {
+		wlr_log(WLR_INFO, "EXITTING1< BYYEEE");
 		ret = 1;
 		goto end;
+	} else {
+		/* Close write, we only need read in Cage. */
+		close(app_fd[1]);
 	}
 
+	sigchld_source = wl_event_loop_add_fd(event_loop, app_fd[0], mask, sigchld_handler, &server);
+	wlr_log(WLR_INFO, "AFTER SPAWN1 %d %d", app_fd[0], app_fd[1]);
+
+	char *loader_arg[] = {"konsole", NULL};
+	int loader_fd[2];
+	if (!spawn_primary_client(loader_arg, &pid_secondary, loader_fd)) {
+		wlr_log(WLR_INFO, "EXITTING< BYYEEE");
+		ret = 1;
+		goto end;
+	} else {
+		/* Close write, we only need read in Cage. */
+		close(app_fd[1]);
+	}
+
+	// wl_signal_add(&server.new_xdg_toplevel.link, &server.new_xdg_toplevel);
+	// wlr_scene_node_raise_to_top();
+
+	sigchld_loader_source = wl_event_loop_add_fd(event_loop, loader_fd[0], mask, sigchld_handler, &server);
+
+	wlr_log(WLR_INFO, "AFTER SPAWN2 %d %d", app_fd[0], app_fd[1]);
 	seat_center_cursor(server.seat);
+	wlr_log(WLR_INFO, "Running wl_display");
+
+	pthread_t killer_thread;
+
+	// Start the kill thread
+	if (pthread_create(&killer_thread, NULL, kill_after_delay, &pid_secondary) != 0) {
+		perror("pthread_create");
+		return EXIT_FAILURE;
+	}
 	wl_display_run(server.wl_display);
+	pthread_join(killer_thread, NULL);
 
 #if CAGE_HAS_XWAYLAND
 	wlr_xwayland_destroy(xwayland);
@@ -603,7 +662,9 @@ main(int argc, char *argv[])
 	wl_display_destroy_clients(server.wl_display);
 
 end:
+	wlr_log(WLR_INFO, "THIS IS THE END");
 	app_ret = cleanup_primary_client(pid);
+	cleanup_primary_client(pid_secondary);
 	if (!ret && server.return_app_code)
 		ret = app_ret;
 
@@ -611,6 +672,9 @@ end:
 	wl_event_source_remove(sigterm_source);
 	if (sigchld_source) {
 		wl_event_source_remove(sigchld_source);
+	}
+	if (sigchld_loader_source) {
+		wl_event_source_remove(sigchld_loader_source);
 	}
 	seat_destroy(server.seat);
 	/* This function is not null-safe, but we only ever get here
