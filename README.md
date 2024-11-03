@@ -1,3 +1,4 @@
+> Fork of Cage with patches for wlroots 0.19. [Patches can be found on this branch](https://github.com/ZirixCZ/cage-19-dev/tree/wlroots-0.19).
 # Cage: a Wayland kiosk
 
 <img src="https://www.hjdskes.nl/img/projects/cage/cage.svg" alt="Cage's logo" width="150px" align="right">
