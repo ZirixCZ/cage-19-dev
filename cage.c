@@ -7,6 +7,7 @@
  */
 
 #define _POSIX_C_SOURCE 200112L
+#define PRESENTATION_VERSION 2
 
 #include "config.h"
 
@@ -436,7 +437,7 @@ main(int argc, char *argv[])
 		goto end;
 	}
 
-	struct wlr_presentation *presentation = wlr_presentation_create(server.wl_display, server.backend);
+	struct wlr_presentation *presentation = wlr_presentation_create(server.wl_display, server.backend, PRESENTATION_VERSION);
 	if (!presentation) {
 		wlr_log(WLR_ERROR, "Unable to create the presentation interface");
 		ret = 1;
